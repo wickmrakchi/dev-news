@@ -1,0 +1,4 @@
+node_modules/
+config.js
+guilds.json
+package-lock.json

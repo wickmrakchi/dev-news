@@ -1,0 +1,22 @@
+{
+  "name": "dev-news-bot",
+  "version": "1.0.0",
+  "description": "Discord bot that fetches developer news from Dev.to",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dev": "nodemon index.js"
+  },
+  "keywords": [
+    "discord",
+    "bot",
+    "devto",
+    "news"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.26.4",
+    "nodemon": "^3.1.14"
+  }
+}
