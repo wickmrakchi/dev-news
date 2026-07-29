@@ -169,7 +169,3 @@ ActionRow: [Trending] [Save] [Bot Info]
 | Components not rendering | Update discord.js to latest: `npm install discord.js@latest` |
 
 ---
-
-## 📄 License
-
-MIT
