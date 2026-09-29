@@ -23,66 +23,229 @@ const {
 const config = require("./config");
 
 const GUILDS_FILE = path.join(__dirname, "guilds.json");
+const STATE_FILE = path.join(__dirname, "state.json");
 const postedArticles = new Set();
 const MAX_STORED_IDS = 100;
 const DEFAULT_BANNER = "https://images.unsplash.com/photo-1517694712202-14dd9538aa97?w=800";
 let cachedArticles = [];
+let isPosting = false;
 const BOT_COLOR = 0x6c63ff;
 
-const CATEGORIES = [
-  { value: "all", label: "All", emoji: "📰", description: "All articles" },
-  { value: "javascript", label: "JavaScript", emoji: "🟨", description: "JavaScript, Frontend" },
+// ==================== TOPICS ====================
+// Single source of truth for every article category: the /news filter menu,
+// the emoji shown next to an article, the label used in embeds, the keyword
+// matching and the description templates are all derived from this list.
+const TOPICS = [
+  { value: "javascript", label: "JavaScript", emoji: "🟨", description: "JavaScript & Node.js" },
+  { value: "typescript", label: "TypeScript", emoji: "🔷", description: "Type safety and generics" },
   { value: "python", label: "Python", emoji: "🐍", description: "Python, Django, Flask" },
-  { value: "typescript", label: "TypeScript", emoji: "🔷", description: "TypeScript" },
   { value: "react", label: "React", emoji: "⚛️", description: "React, Next.js" },
   { value: "vue", label: "Vue.js", emoji: "💚", description: "Vue, Nuxt" },
   { value: "angular", label: "Angular", emoji: "🔴", description: "Angular" },
   { value: "devops", label: "DevOps & Cloud", emoji: "⚙️", description: "Docker, K8s, AWS" },
   { value: "database", label: "Databases", emoji: "🗄️", description: "SQL, NoSQL, Redis" },
-  { value: "security", label: "Security", emoji: "🔒", description: "Auth, Security" },
-  { value: "ai", label: "AI & ML", emoji: "🤖", description: "AI, Machine Learning" },
+  { value: "security", label: "Security", emoji: "🔒", description: "Auth and security" },
+  { value: "ai", label: "AI & ML", emoji: "🤖", description: "AI and machine learning" },
   { value: "mobile", label: "Mobile", emoji: "📱", description: "iOS, Android, Flutter" },
   { value: "rust", label: "Rust", emoji: "🦀", description: "Rust" },
   { value: "go", label: "Go", emoji: "🐹", description: "Golang" },
+  { value: "webdev", label: "Web Dev", emoji: "🌐", description: "HTML, CSS, PWA" },
 ];
 
-const CATEGORY_KEYWORDS = {
-  javascript: ["javascript", "js", "node", "frontend"],
-  python: ["python", "django", "flask", "fastapi"],
-  typescript: ["typescript", "ts"],
-  react: ["react", "jsx", "tsx", "nextjs", "remix"],
-  vue: ["vue", "nuxt", "vuejs"],
-  angular: ["angular", "ng"],
-  devops: ["devops", "docker", "kubernetes", "ci/cd", "aws", "cloud", "deploy"],
-  database: ["database", "sql", "postgres", "mongodb", "redis", "orm"],
-  security: ["security", "auth", "oauth", "jwt", "encryption"],
-  ai: ["ai", "machine learning", "ml", "deep learning", "neural", "gpt", "llm", "openai"],
-  mobile: ["mobile", "ios", "android", "flutter", "react-native", "swift"],
-  rust: ["rust"],
-  go: ["go", "golang"],
+const DEFAULT_TOPIC = {
+  value: "other",
+  label: "General",
+  emoji: "📰",
+  description: "Anything else worth reading",
 };
 
-// ==================== GUILD CONFIG ====================
-function loadGuildConfigs() {
+// Shown under the title on the card, one per topic.
+const TOPIC_TEMPLATES = {
+  javascript: "This article explores modern JavaScript concepts, from ES6+ to advanced patterns, helping you write cleaner and more efficient code.",
+  typescript: "TypeScript brings type safety to JavaScript. Explore advanced types, generics, and patterns for production-grade code.",
+  python: "Python continues to dominate with its versatility. This piece covers the latest developments, libraries, and best practices in the Python ecosystem.",
+  react: "Dive into React development with patterns covering hooks, state management, performance optimization, and component architecture.",
+  vue: "Vue.js keeps evolving with powerful features. This article explores the Composition API, reactivity, and scalable patterns.",
+  angular: "Angular remains a robust framework for enterprise apps. This covers the latest features, DI patterns, and optimization strategies.",
+  devops: "DevOps practices are essential for modern teams. This covers CI/CD, containerization, IaC, and cloud-native patterns.",
+  database: "Database design is critical for performance. This covers SQL optimization, NoSQL patterns, and data modeling best practices.",
+  security: "Security should never be an afterthought. This explores common vulnerabilities, auth patterns, and defense strategies.",
+  ai: "AI is transforming development. This covers practical ML implementations, LLM integration, and modern AI tooling.",
+  mobile: "Mobile development keeps evolving. This covers cross-platform frameworks, native patterns, and app architecture.",
+  rust: "Rust offers memory safety without a GC. This explores ownership, concurrency, and systems programming patterns.",
+  go: "Go excels at concurrent backend services. This covers goroutines, channels, and building scalable microservices.",
+  webdev: "Web development evolves fast. This covers responsive design, performance, PWA patterns, and modern CSS/HTML techniques.",
+  other: "A valuable resource for developers looking to level up their skills and stay current with industry trends.",
+};
+
+// dev.to tags are written in many shapes, so each one is normalized to a
+// single canonical form before matching. "ai" and "ml" are machine learning
+// tags, while "rails" and "digi" are not: matching on substrings is what used
+// to misclassify a Rails article as AI.
+const TAG_ALIASES = {
+  "node.js": "node",
+  "nodejs": "node",
+  "node js": "node",
+  "next.js": "nextjs",
+  "nextjs": "nextjs",
+  "vue.js": "vue",
+  "vuejs": "vue",
+  nuxt: "vue",
+  "nuxt.js": "vue",
+  "next.js/react": "react",
+  "react.js": "react",
+  "reactjs": "react",
+  "react native": "mobile",
+  "react-native": "mobile",
+  "flutter/dart": "flutter",
+  "dart": "flutter",
+  "ci/cd": "devops",
+  cicd: "devops",
+  "github actions": "devops",
+  "machine learning": "ai",
+  "deep learning": "ai",
+  "artificial intelligence": "ai",
+  "generative ai": "ai",
+  "chatgpt": "ai",
+  "large language models": "ai",
+  "llms": "ai",
+  "web development": "webdev",
+  web: "webdev",
+  "front end": "webdev",
+  "front-end": "webdev",
+  frontend: "webdev",
+  "back end": "webdev",
+  "back-end": "webdev",
+  backend: "webdev",
+  fullstack: "webdev",
+  pwa: "webdev",
+  postgres: "database",
+  postgresql: "database",
+  mongodb: "database",
+  nosql: "database",
+  mysql: "database",
+  sqlite: "database",
+  redis: "database",
+  "system design": "architecture",
+  "cloud computing": "cloud",
+  "aws": "cloud",
+  "google cloud": "cloud",
+  gcp: "cloud",
+  azure: "cloud",
+  k8s: "kubernetes",
+  kubernetes: "kubernetes",
+  golang: "go",
+  "web security": "security",
+  "appsec": "security",
+  "social engineering": "security",
+  "web3": "web3",
+  blockchain: "web3",
+  "prompt engineering": "ai",
+};
+
+const TAG_KEYWORDS = {
+  javascript: ["javascript", "js", "es6", "ecmascript"],
+  typescript: ["typescript", "ts"],
+  python: ["python", "django", "flask", "fastapi"],
+  react: ["react", "nextjs", "remix"],
+  vue: ["vue", "nuxt"],
+  angular: ["angular"],
+  devops: ["devops", "docker", "kubernetes", "ci/cd", "cloud", "deploy"],
+  database: ["database", "sql", "postgres", "mongodb", "redis", "orm"],
+  security: ["security", "auth", "oauth", "jwt", "encryption"],
+  ai: ["ai", "ml", "llm", "gpt", "openai"],
+  mobile: ["mobile", "ios", "android", "flutter", "swift", "kotlin"],
+  rust: ["rust"],
+  go: ["go", "golang"],
+  webdev: ["html", "css", "responsive", "http"],
+};
+
+function normalizeTag(tag) {
+  const key = String(tag).toLowerCase().trim();
+  return TAG_ALIASES[key] || key;
+}
+
+function normalizeTags(tags) {
+  return Array.from(
+    new Set((tags || []).map(normalizeTag).filter((tag) => tag.length > 0))
+  );
+}
+
+// Returns the topic whose keywords best describe this article, based on how
+// many of its tags match. Returns null when nothing matches.
+function findTopic(article) {
+  const tags = new Set(normalizeTags(article.tag_list));
+  if (tags.size === 0) return null;
+
+  let best = null;
+  let bestScore = 0;
+
+  for (const [value, keywords] of Object.entries(TAG_KEYWORDS)) {
+    let score = 0;
+    for (const keyword of keywords) {
+      if (tags.has(keyword)) score += 1;
+    }
+    // An exact tag hit outranks a keyword that is only a substring of it.
+    if (tags.has(value)) score += 2;
+    if (score > bestScore) {
+      bestScore = score;
+      best = value;
+    }
+  }
+
+  if (!best) return null;
+
+  const title = String(article.title || "").toLowerCase();
+  if (bestScore === 1 && title.includes(best)) return null;
+
+  return best;
+}
+
+function getTopic(value) {
+  return TOPICS.find((topic) => topic.value === value) || DEFAULT_TOPIC;
+}
+
+function getEmojiForArticle(article) {
+  const topic = findTopic(article);
+  return topic ? getTopic(topic).emoji : DEFAULT_TOPIC.emoji;
+}
+
+function extractCategory(article) {
+  const topic = findTopic(article);
+  return topic ? getTopic(topic).label : DEFAULT_TOPIC.label;
+}
+
+function truncate(str, max) {
+  if (!str) return "";
+  return str.length > max ? str.substring(0, max).trim() + "..." : str;
+}
+
+// ==================== PERSISTENCE ====================
+function readJson(file, fallback) {
   try {
-    if (fs.existsSync(GUILDS_FILE)) {
-      return JSON.parse(fs.readFileSync(GUILDS_FILE, "utf-8"));
+    if (fs.existsSync(file)) {
+      return JSON.parse(fs.readFileSync(file, "utf-8"));
     }
   } catch (e) {
-    console.error("Error loading guild configs:", e.message);
+    console.error(`Error reading ${path.basename(file)}:`, e.message);
   }
-  return {};
+  return fallback;
 }
 
-function saveGuildConfigs(guilds) {
+function writeJson(file, data) {
   try {
-    fs.writeFileSync(GUILDS_FILE, JSON.stringify(guilds, null, 2), "utf-8");
+    fs.writeFileSync(file, JSON.stringify(data, null, 2), "utf-8");
   } catch (e) {
-    console.error("Error saving guild configs:", e.message);
+    console.error(`Error writing ${path.basename(file)}:`, e.message);
   }
 }
 
-let guildConfigs = loadGuildConfigs();
+// ==================== GUILD CONFIG ====================
+let guildConfigs = readJson(GUILDS_FILE, {});
+
+function saveGuildConfigs() {
+  writeJson(GUILDS_FILE, guildConfigs);
+}
 
 function getChannelsForGuild(guildId) {
   const cfg = guildConfigs[guildId];
@@ -92,7 +255,14 @@ function getChannelsForGuild(guildId) {
 function setChannelsForGuild(guildId, channels) {
   if (!guildConfigs[guildId]) guildConfigs[guildId] = {};
   guildConfigs[guildId].channels = channels;
-  saveGuildConfigs(guildConfigs);
+  saveGuildConfigs();
+}
+
+function removeGuildConfig(guildId) {
+  if (guildConfigs[guildId]) {
+    delete guildConfigs[guildId];
+    saveGuildConfigs();
+  }
 }
 
 // ==================== EXPERIENCE SYSTEM ====================
@@ -105,21 +275,30 @@ class ExperienceSystem {
     this.totalComments = 0;
   }
 
+  // Restores the counters from disk so leveling survives a restart.
+  load(state) {
+    if (!state) return;
+    this.xp = Number(state.xp) || 0;
+    this.articlesPosted = Number(state.articlesPosted) || 0;
+    this.totalReactions = Number(state.totalReactions) || 0;
+    this.totalComments = Number(state.totalComments) || 0;
+    this.level = this.getLevel(this.xp);
+  }
+
+  toJSON() {
+    return {
+      xp: this.xp,
+      articlesPosted: this.articlesPosted,
+      totalReactions: this.totalReactions,
+      totalComments: this.totalComments,
+    };
+  }
+
   getLevel(xp) {
     if (xp >= config.levelThresholds.expert) return "expert";
     if (xp >= config.levelThresholds.experienced) return "experienced";
     if (xp >= config.levelThresholds.learning) return "learning";
     return "new";
-  }
-
-  getLevelBadge(level) {
-    const badges = {
-      new: "<:none:>",
-      learning: "<:none:>",
-      experienced: "<:none:>",
-      expert: "<:none:>",
-    };
-    return badges[level] || "";
   }
 
   getLevelLabel(level) {
@@ -138,12 +317,18 @@ class ExperienceSystem {
   }
 
   getLevelProgress() {
-    const thresholds = [0, config.levelThresholds.learning, config.levelThresholds.experienced, config.levelThresholds.expert];
+    const thresholds = [
+      0,
+      config.levelThresholds.learning,
+      config.levelThresholds.experienced,
+      config.levelThresholds.expert,
+    ];
     const levelNames = ["new", "learning", "experienced", "expert"];
     const idx = levelNames.indexOf(this.level);
     const currentMin = thresholds[idx];
-    const nextMax = thresholds[idx + 1] || currentMin + 200;
-    const progress = Math.min(1, (this.xp - currentMin) / (nextMax - currentMin));
+    const nextMin = thresholds[idx + 1];
+    if (nextMin === undefined) return 100;
+    const progress = Math.min(1, Math.max(0, (this.xp - currentMin) / (nextMin - currentMin)));
     return Math.floor(progress * 100);
   }
 
@@ -155,19 +340,20 @@ class ExperienceSystem {
   calculateXP(article) {
     const reactions = article.public_reactions_count || 0;
     const comments = article.comments_count || 0;
-    const saves = article.public_reactions_count || 0;
-    const xpGained = config.xpPerArticle +
-      (reactions * config.xpMultiplier.reactions) +
-      (comments * config.xpMultiplier.comments) +
-      (saves * config.xpMultiplier.saves);
-    this.totalReactions += reactions;
-    this.totalComments += comments;
-    this.articlesPosted++;
+    // dev.to's public API does not expose a saves count, so saving a post
+    // cannot be scored separately from reacting to it.
+    const xpGained =
+      config.xpPerArticle +
+      reactions * config.xpMultiplier.reactions +
+      comments * config.xpMultiplier.comments;
     return Math.floor(xpGained);
   }
 
-  addXP(xpGained) {
+  addXP(xpGained, article) {
     this.xp += xpGained;
+    this.articlesPosted += 1;
+    this.totalReactions += article.public_reactions_count || 0;
+    this.totalComments += article.comments_count || 0;
     const newLevel = this.getLevel(this.xp);
     const levelChanged = newLevel !== this.level;
     this.level = newLevel;
@@ -183,76 +369,64 @@ class ExperienceSystem {
     const reactions = article.public_reactions_count || 0;
     const comments = article.comments_count || 0;
     const readingTime = article.reading_time_minutes || 0;
-    return reactions >= threshold.minReactions &&
+    return (
+      reactions >= threshold.minReactions &&
       comments >= threshold.minComments &&
-      readingTime >= threshold.minReadingTime;
+      readingTime >= threshold.minReadingTime
+    );
   }
 }
 
 const experienceSystem = new ExperienceSystem();
 
+// The posted article ids and the XP counters are restored on boot, otherwise
+// the bot forgets everything and reposts the whole feed after each restart.
+const persistedState = readJson(STATE_FILE, null);
+if (persistedState) {
+  if (Array.isArray(persistedState.postedArticles)) {
+    for (const id of persistedState.postedArticles) postedArticles.add(id);
+  }
+  experienceSystem.load(persistedState.experience);
+}
+
+function saveState() {
+  writeJson(STATE_FILE, {
+    postedArticles: Array.from(postedArticles),
+    experience: experienceSystem.toJSON(),
+  });
+}
+
 // ==================== DESCRIPTION GENERATOR ====================
 class DescriptionGenerator {
   constructor() {
-    this.topicTemplates = {
-      javascript: "This article explores modern JavaScript concepts, from ES6+ to advanced patterns, helping you write cleaner and more efficient code.",
-      python: "Python continues to dominate with its versatility. This piece covers the latest developments, libraries, and best practices in the Python ecosystem.",
-      react: "Dive into React development with patterns covering hooks, state management, performance optimization, and component architecture.",
-      vue: "Vue.js keeps evolving with powerful features. This article explores the Composition API, reactivity, and scalable patterns.",
-      angular: "Angular remains a robust framework for enterprise apps. This covers the latest features, DI patterns, and optimization strategies.",
-      node: "Node.js powers modern backends. This covers async patterns, performance tuning, API design, and the evolving ecosystem.",
-      typescript: "TypeScript brings type safety to JavaScript. Explore advanced types, generics, and patterns for production-grade code.",
-      devops: "DevOps practices are essential for modern teams. This covers CI/CD, containerization, IaC, and cloud-native patterns.",
-      database: "Database design is critical for performance. This covers SQL optimization, NoSQL patterns, and data modeling best practices.",
-      security: "Security should never be an afterthought. This explores common vulnerabilities, auth patterns, and defense strategies.",
-      ai: "AI is transforming development. This covers practical ML implementations, LLM integration, and modern AI tooling.",
-      webdev: "Web development evolves fast. This covers responsive design, performance, PWA patterns, and modern CSS/HTML techniques.",
-      rust: "Rust offers memory safety without a GC. This explores ownership, concurrency, and systems programming patterns.",
-      go: "Go excels at concurrent backend services. This covers goroutines, channels, and building scalable microservices.",
-      mobile: "Mobile development keeps evolving. This covers cross-platform frameworks, native patterns, and app architecture.",
-      default: "A valuable resource for developers looking to level up their skills and stay current with industry trends.",
-    };
-
-    this.keywordMap = {
-      javascript: ["javascript", "js", "node", "frontend", "react", "vue", "angular"],
-      python: ["python", "django", "flask", "fastapi"],
-      react: ["react", "jsx", "tsx", "nextjs", "remix"],
-      vue: ["vue", "nuxt", "vuejs"],
-      angular: ["angular", "ng"],
-      node: ["node", "express", "backend", "api", "rest"],
-      typescript: ["typescript", "ts"],
-      devops: ["devops", "docker", "kubernetes", "ci/cd", "aws", "cloud", "deploy"],
-      database: ["database", "sql", "postgres", "mongodb", "redis", "orm"],
-      security: ["security", "auth", "oauth", "jwt", "encryption"],
-      ai: ["ai", "machine learning", "ml", "deep learning", "neural", "gpt", "llm", "openai"],
-      webdev: ["web", "html", "css", "responsive", "pwa", "http"],
-      rust: ["rust"],
-      go: ["go", "golang"],
-      mobile: ["mobile", "ios", "android", "flutter", "react-native", "swift"],
-    };
+    this.techPrefixes = [
+      "python", "javascript", "typescript", "react", "vue", "angular",
+      "node", "rust", "go", "java", "c++", "php", "ruby",
+    ];
   }
 
-  findMatchingTopic(tags) {
-    const tagString = (tags || []).join(" ").toLowerCase();
-    for (const [topic, keywords] of Object.entries(this.keywordMap)) {
-      for (const keyword of keywords) {
-        if (tagString.includes(keyword)) return topic;
-      }
-    }
-    return "default";
+  findMatchingTopic(article) {
+    const topic = findTopic(article);
+    if (topic) return topic;
+
+    const tags = new Set(normalizeTags(article.tag_list));
+    if (tags.has("node")) return "node";
+
+    return "other";
   }
 
   generateDescription(title, tags) {
-    const topic = this.findMatchingTopic(tags);
-    let description = this.topicTemplates[topic];
-    const titleLower = title.toLowerCase();
-    for (const tech of ["python", "javascript", "typescript", "react", "vue", "angular", "node", "rust", "go", "java", "c++", "php", "ruby"]) {
+    let description = TOPIC_TEMPLATES[this.findMatchingTopic({ title, tag_list: tags })];
+
+    const titleLower = String(title || "").toLowerCase();
+    for (const tech of this.techPrefixes) {
       if (titleLower.includes(tech)) {
         description = `${tech.charAt(0).toUpperCase() + tech.slice(1)} developers will find this particularly valuable. ${description}`;
         break;
       }
     }
-    return description.substring(0, 300);
+
+    return truncate(description, 300);
   }
 }
 
@@ -266,7 +440,10 @@ const client = new Client({
 // ==================== UTILITY FUNCTIONS ====================
 async function fetchDevNews() {
   try {
-    const res = await fetch("https://dev.to/api/articles?per_page=60&top=7");
+    const res = await fetch("https://dev.to/api/articles?per_page=60&top=7", {
+      signal: AbortSignal.timeout(15000),
+      headers: { "User-Agent": `${config.sourceName} Discord bot` },
+    });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const articles = await res.json();
     cachedArticles = articles;
@@ -275,41 +452,6 @@ async function fetchDevNews() {
     console.error("Fetch error:", e.message);
     return [];
   }
-}
-
-function getEmojiForTag(tags) {
-  const map = {
-    javascript: "🟨", python: "🐍", typescript: "🔷", react: "⚛️",
-    vue: "💚", angular: "🔴", node: "🟢", rust: "🦀", go: "🐹",
-    java: "☕", css: "🎨", html: "📄", webdev: "🌐", devops: "⚙️",
-    database: "🗄️", security: "🔒", ai: "🤖", tutorial: "📚",
-    news: "📰", discussion: "💭", beginner: "🌱", productivity: "⚡", mobile: "📱",
-  };
-  const s = (tags || []).join(" ").toLowerCase();
-  for (const [k, v] of Object.entries(map)) {
-    if (s.includes(k)) return v;
-  }
-  return "📰";
-}
-
-function extractCategory(tags) {
-  const map = [
-    ["Python", ["python", "django", "flask"]],
-    ["Web Dev", ["javascript", "typescript", "react", "vue", "angular", "html", "css", "webdev", "frontend", "backend"]],
-    ["DevOps & Cloud", ["devops", "docker", "kubernetes", "aws", "cloud", "azure"]],
-    ["Databases", ["database", "sql", "mongodb", "postgres", "redis"]],
-    ["Security", ["security", "auth", "oauth", "jwt"]],
-    ["AI & ML", ["ai", "machine-learning", "ml", "deep-learning", "gpt", "llm"]],
-    ["Mobile", ["mobile", "ios", "android", "flutter", "react-native"]],
-    ["General", ["programming", "code", "developer", "software"]],
-  ];
-  const s = (tags || []).join(" ").toLowerCase();
-  for (const [label, kws] of map) {
-    for (const kw of kws) {
-      if (s.includes(kw)) return label;
-    }
-  }
-  return "General";
 }
 
 function formatRelativeTime(dateString) {
@@ -343,31 +485,18 @@ function formatTags(tagList) {
 
 function matchesCategory(article, value) {
   if (value === "all") return true;
-  const kws = CATEGORY_KEYWORDS[value];
-  if (!kws) return true;
-  const s = (article.tag_list || []).join(" ").toLowerCase();
-  const t = (article.title || "").toLowerCase();
-  return kws.some((kw) => s.includes(kw) || t.includes(kw));
-}
-
-function getCategoryByValue(value) {
-  return CATEGORIES.find((c) => c.value === value) || CATEGORIES[0];
+  return findTopic(article) === value;
 }
 
 function getAvatarForLevel(level) {
-  const map = { expert: 0, experienced: 1, learning: 2, new: 3 };
+  const map = { new: 3, learning: 2, experienced: 1, expert: 1 };
   return `https://cdn.discordapp.com/embed/avatars/${map[level] || 3}.png`;
-}
-
-function truncate(str, max) {
-  if (!str) return "";
-  return str.length > max ? str.substring(0, max).trim() + "..." : str;
 }
 
 // ==================== COMPONENTS V2 BUILDERS ====================
 function buildArticleMessage(article) {
-  const emoji = getEmojiForTag(article.tag_list);
-  const category = extractCategory(article.tag_list);
+  const emoji = getEmojiForArticle(article);
+  const category = extractCategory(article);
   const score = calcTechScore(article);
   const relTime = formatRelativeTime(article.published_at);
   const desc = descriptionGenerator.generateDescription(article.title, article.tag_list);
@@ -379,10 +508,8 @@ function buildArticleMessage(article) {
   const readTime = article.reading_time_minutes || 0;
   const tags = formatTags(article.tag_list);
 
-  const bgColor = levelColor === 0xff9800 ? 0x5865f2 : levelColor;
-
   const container = new ContainerBuilder()
-    .setAccentColor(bgColor)
+    .setAccentColor(levelColor)
     .addTextDisplayComponents(
       new TextDisplayBuilder()
         .setContent(`# ${emoji} ${article.title}\n\n${desc}`)
@@ -433,9 +560,12 @@ function buildArticleMessage(article) {
 }
 
 function buildArticleButtons(article) {
+  const username = article.user?.username;
   const r1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder().setLabel("📖 Read Article").setStyle(ButtonStyle.Link).setURL(article.url),
-    new ButtonBuilder().setLabel("👤 View Profile").setStyle(ButtonStyle.Link).setURL(`https://dev.to/${article.user?.username}`),
+    username
+      ? new ButtonBuilder().setLabel("👤 View Profile").setStyle(ButtonStyle.Link).setURL(`https://dev.to/${username}`)
+      : new ButtonBuilder().setLabel("👤 No Profile").setStyle(ButtonStyle.Secondary).setDisabled(true),
     new ButtonBuilder().setLabel("👍 Helpful").setStyle(ButtonStyle.Secondary).setCustomId(`act_helpful_${article.id}`),
   );
   const r2 = new ActionRowBuilder().addComponents(
@@ -447,21 +577,29 @@ function buildArticleButtons(article) {
 }
 
 function buildCategoryMenu(currentCategory = "all", page = 0) {
-  const cat = getCategoryByValue(currentCategory);
-  const menu = new StringSelectMenuBuilder()
-    .setCustomId(`cat|${currentCategory}|${page}`)
-    .setPlaceholder(`${cat.emoji} ${cat.label}`)
-    .addOptions(
-      CATEGORIES.map((c) =>
-        new StringSelectMenuOptionBuilder()
-          .setLabel(c.label)
-          .setValue(c.value)
-          .setDescription(c.description)
-          .setEmoji(c.emoji)
-          .setDefault(c.value === currentCategory)
-      )
-    );
-  return new ActionRowBuilder().addComponents(menu);
+  const options = [
+    new StringSelectMenuOptionBuilder()
+      .setLabel("📰 All")
+      .setValue("all")
+      .setDescription("Every article")
+      .setEmoji("📰")
+      .setDefault(currentCategory === "all"),
+    ...TOPICS.map((topic) =>
+      new StringSelectMenuOptionBuilder()
+        .setLabel(topic.label)
+        .setValue(topic.value)
+        .setDescription(topic.description)
+        .setEmoji(topic.emoji)
+        .setDefault(topic.value === currentCategory)
+    ),
+  ];
+
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`cat|${currentCategory}|${page}`)
+      .setPlaceholder(currentCategory === "all" ? "📰 All articles" : `${getTopic(currentCategory).emoji} ${getTopic(currentCategory).label}`)
+      .addOptions(options)
+  );
 }
 
 function buildPagination(category, page, total) {
@@ -497,6 +635,7 @@ function buildStatsContainer() {
   const levelLabel = es.getLevelLabel(es.level);
   const emoji = es.getLevelEmoji(es.level);
   const progress = es.getLevelProgress();
+  const threshold = es.getQualityThreshold();
   return new ContainerBuilder()
     .setAccentColor(BOT_COLOR)
     .addTextDisplayComponents(
@@ -508,7 +647,7 @@ function buildStatsContainer() {
           `📝 **Articles:** ${es.articlesPosted}\n` +
           `❤️ **Reactions:** ${es.totalReactions}\n` +
           `💬 **Comments:** ${es.totalComments}\n` +
-          `\`\`\`\nQuality Filter: Min ${es.getQualityThreshold().minReactions} reactions, ${es.getQualityThreshold().minComments} comments, ${es.getQualityThreshold().minReadingTime} min read\n\`\`\``
+          `\`\`\`\nQuality Filter: Min ${threshold.minReactions} reactions, ${threshold.minComments} comments, ${threshold.minReadingTime} min read\n\`\`\``
         )
     );
 }
@@ -548,13 +687,26 @@ async function sendArticle(channel, article) {
 
 // ==================== POST NEWS ====================
 async function postNews() {
+  // The interval can fire again while a previous run is still posting, which
+  // would send the same article twice. Only one run at a time is allowed.
+  if (isPosting) {
+    console.log("Previous post still running, skipping this cycle.");
+    return;
+  }
+  isPosting = true;
+
   try {
     const allChannels = new Set();
     for (const gid of Object.keys(guildConfigs)) {
       for (const cid of getChannelsForGuild(gid)) {
         let ch = client.channels.cache.get(cid);
         if (!ch) {
-          try { ch = await client.channels.fetch(cid); } catch (_) { }
+          try {
+            ch = await client.channels.fetch(cid);
+          } catch (e) {
+            console.error(`Cannot access channel ${cid}:`, e.message);
+            continue;
+          }
         }
         if (ch) allChannels.add(ch);
       }
@@ -573,28 +725,41 @@ async function postNews() {
 
     for (const article of articles) {
       if (postedArticles.has(article.id)) continue;
-      if (!experienceSystem.meetsQualityThreshold(article)) { skipped++; continue; }
+      if (!experienceSystem.meetsQualityThreshold(article)) {
+        skipped++;
+        continue;
+      }
+
+      // An article counts once, no matter how many channels it goes to.
+      addPostedArticle(article.id);
+      saveState();
+
+      const xp = experienceSystem.calculateXP(article);
+      const result = experienceSystem.addXP(xp, article);
+      saveState();
+      newPosts++;
 
       for (const ch of allChannels) {
         try {
           await sendArticle(ch, article);
-          if (!postedArticles.has(article.id)) {
-            const xp = experienceSystem.calculateXP(article);
-            const result = experienceSystem.addXP(xp);
-            addPostedArticle(article.id);
-            newPosts++;
-            let log = `Posted: ${article.title.substring(0, 60)}`;
-            log += result.levelChanged ? ` | LEVEL UP → ${result.newLevel} (${experienceSystem.xp} XP)` : ` | +${xp} XP`;
-            console.log(log);
-          }
         } catch (e) {
           console.error("Post error:", e.message);
         }
       }
+
+      const log = `Posted: ${article.title.substring(0, 60)}`;
+      console.log(
+        result.levelChanged
+          ? `${log} | LEVEL UP → ${result.newLevel} (${experienceSystem.xp} XP)`
+          : `${log} | +${xp} XP`
+      );
     }
+
     console.log(`Done. New: ${newPosts}, Skipped: ${skipped}, Total tracked: ${postedArticles.size}`);
   } catch (e) {
     console.error("postNews error:", e.message);
+  } finally {
+    isPosting = false;
   }
 }
 
@@ -625,12 +790,12 @@ async function sendNewsBrowse(interaction, category = "all", page = 0) {
     return;
   }
 
-  const totalPages = Math.ceil(filtered.length / 3);
-  const p = Math.min(page, totalPages - 1);
+  const totalPages = Math.max(1, Math.ceil(filtered.length / 3));
+  const p = Math.min(Math.max(0, page), totalPages - 1);
   const start = p * 3;
   const pageItems = filtered.slice(start, start + 3);
 
-  const cat = getCategoryByValue(category);
+  const cat = category === "all" ? { emoji: "📰", label: "All" } : getTopic(category);
   const header = new ContainerBuilder()
     .setAccentColor(BOT_COLOR)
     .addTextDisplayComponents(
@@ -643,8 +808,8 @@ async function sendNewsBrowse(interaction, category = "all", page = 0) {
     );
 
   const items = pageItems.map((a, i) => {
-    const em = getEmojiForTag(a.tag_list);
-    const cat_ = extractCategory(a.tag_list);
+    const em = getEmojiForArticle(a);
+    const cat_ = extractCategory(a);
     const time = formatRelativeTime(a.published_at);
     const sc = calcTechScore(a);
     const n = start + i + 1;
@@ -668,17 +833,6 @@ async function sendNewsBrowse(interaction, category = "all", page = 0) {
     flags: MessageFlags.IsComponentsV2,
     components,
   });
-}
-
-// ==================== PARSE CUSTOM ID ====================
-function parseCustomId(id) {
-  // cat|category|page
-  // pg|prev|category|page
-  // pg|next|category|page
-  // act_helpful|1234 -> but these use _ as separator
-  // pg|info
-  const parts = id.split("|");
-  return parts;
 }
 
 // ==================== SLASH COMMANDS ====================
@@ -780,21 +934,17 @@ client.on("interactionCreate", async (interaction) => {
 
     // ===== SELECT MENUS =====
     if (interaction.isStringSelectMenu()) {
-      const id = interaction.customId;
-      const parts = parseCustomId(id);
+      const parts = interaction.customId.split("|");
 
       if (parts[0] === "cat") {
-        // cat|category|page
-        const categoryValue = interaction.values[0];
         await interaction.deferUpdate();
-        await sendNewsBrowse(interaction, categoryValue, 0);
+        await sendNewsBrowse(interaction, interaction.values[0], 0);
         return;
       }
 
       if (parts[0] === "setup" && parts[1] === "channel") {
         const selectedChannelId = interaction.values[0];
-        const guildId = interaction.guildId;
-        setChannelsForGuild(guildId, [selectedChannelId]);
+        setChannelsForGuild(interaction.guildId, [selectedChannelId]);
 
         const confirm = new ContainerBuilder()
           .setAccentColor(0x4caf50)
@@ -817,7 +967,7 @@ client.on("interactionCreate", async (interaction) => {
     // ===== BUTTONS =====
     if (interaction.isButton()) {
       const id = interaction.customId;
-      const parts = parseCustomId(id);
+      const parts = id.split("|");
 
       if (parts[0] === "pg") {
         // pg|prev|category|page  or  pg|next|category|page
@@ -832,10 +982,9 @@ client.on("interactionCreate", async (interaction) => {
         if (parts[1] === "info") return; // disabled button
       }
 
-      // action buttons (act_helpful, act_trending, act_save, act_botinfo)
+      // action buttons use "_" as separator: act_<action>_<articleId>
       if (id.startsWith("act_")) {
-        const partsAct = id.split("_");
-        const actionType = partsAct[1];
+        const actionType = id.split("_")[1];
         if (actionType === "helpful") {
           await interaction.reply({ content: "👍 Thanks for your feedback!", ephemeral: true });
         } else if (actionType === "trending") {
@@ -856,19 +1005,34 @@ client.on("interactionCreate", async (interaction) => {
     console.error("Interaction error:", e.message, e.stack?.substring(0, 200));
     try {
       if (interaction.deferred || interaction.replied) {
-        await interaction.editReply({ content: `❌ Error: ${e.message}` });
+        // The original message may be a Components V2 one, and those cannot
+        // be edited with plain content.
+        await interaction.editReply({
+          flags: MessageFlags.IsComponentsV2,
+          components: [
+            new ContainerBuilder()
+              .setAccentColor(0xe74c3c)
+              .addTextDisplayComponents(
+                new TextDisplayBuilder().setContent("# ❌ Something went wrong\nThe command could not be completed. Please try again.")
+              ),
+          ],
+        });
       } else {
-        await interaction.reply({ content: `❌ Error: ${e.message}`, ephemeral: true });
+        await interaction.reply({ content: "❌ Something went wrong.", ephemeral: true });
       }
-    } catch (_) { }
+    } catch (replyError) {
+      console.error("Could not deliver the error message:", replyError.message);
+    }
   }
 });
 
 // ==================== BOT READY ====================
-client.on("ready", async () => {
-  console.log(`✅ Bot online as ${client.user.tag}`);
+// "ready" fires again after every reconnect, so a plain on() handler would
+// register a second interval each time and post news twice as often.
+client.once("ready", async () => {
+  console.log(`✅ Bot online as ${client.user.username}`);
   console.log(`🌐 Serving ${client.guilds.cache.size} servers`);
-  console.log(`📊 Level: ${experienceSystem.level} | XP: ${experienceSystem.xp}`);
+  console.log(`📊 Level: ${experienceSystem.level} | XP: ${experienceSystem.xp} | Tracked: ${postedArticles.size}`);
   await registerSlashCommands();
   await fetchDevNews();
   await postNews();
@@ -876,12 +1040,19 @@ client.on("ready", async () => {
   console.log(`⏰ Auto-fetch every ${config.fetchInterval / 60000} min`);
 });
 
-// ==================== GUILD JOIN ====================
+// ==================== GUILD EVENTS ====================
 client.on("guildCreate", async (guild) => {
   console.log(`➕ Added to server: ${guild.name} (${guild.id})`);
   if (!guildConfigs[guild.id]) {
     setChannelsForGuild(guild.id, []);
   }
+});
+
+// Without this, the bot keeps the settings of servers it was removed from and
+// keeps trying to reach channels it can no longer access.
+client.on("guildDelete", async (guild) => {
+  console.log(`➖ Removed from server: ${guild.name} (${guild.id})`);
+  removeGuildConfig(guild.id);
 });
 
 process.on("uncaughtException", (e) => console.error("uncaughtException:", e.message));

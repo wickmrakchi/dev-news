@@ -5,7 +5,6 @@ module.exports = {
   xpMultiplier: {
     reactions: 0.5,
     comments: 2,
-    saves: 3,
   },
   levelThresholds: {
     new: 0,
@@ -19,5 +18,5 @@ module.exports = {
     experienced: { minReactions: 20, minComments: 5, minReadingTime: 5 },
     expert: { minReactions: 50, minComments: 10, minReadingTime: 8 },
   },
-  sourceName: "Mrakchi.dev",
+  sourceName: "Dev.to",
 };
